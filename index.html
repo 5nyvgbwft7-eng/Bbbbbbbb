@@ -331,6 +331,10 @@ var S;
 function fresh(dep){return{wb:dep,dep:dep,pos:{},ord:[],his:[],fees:0,lev:{},iso:{},sym:"BTCUSDT",iv:"15m",hide:false,day:null,oid:1}}
 try{S=JSON.parse(localStorage.getItem(KEY)||"null")}catch(x){S=null}
 if(!S||typeof S.wb!=="number")S=fresh(79000);
+(function repair(){if(!S||!S.his)return;var bad=S.his.filter(function(h){return!(h.x>0)||!isFinite(h.x)});if(!bad.length)return;
+  bad.forEach(function(h){if(!S.pos[h.s])S.pos[h.s]={s:h.s,sd:h.sd,q:h.q,e:h.e,lev:h.lev,iso:!!h.iso,im:h.iso?h.q*h.e/h.lev:0,rp:0,ofee:0,t:h.t0||Date.now(),tp:0,sl:0,tpT:"last",slT:"last"}});
+  S.his=S.his.filter(function(h){return h.x>0&&isFinite(h.x)});
+  S.wb=S.dep+S.his.reduce(function(a,h){return a+h.pnl},0);S.repaired=bad.length})();
 var saveT=0;function save(){clearTimeout(saveT);saveT=setTimeout(function(){try{localStorage.setItem(KEY,JSON.stringify(S))}catch(x){}},300)}
 function levOf(s){return Math.min(S.lev[s]||20,maxLev(s))}
 function isIso(s){return!!S.iso[s]}
@@ -400,18 +404,19 @@ function marketFill(s,sd,N,lev,iso,ro,tp,sl){
   toast((ro?"Сокращено: ":"Исполнено: ")+sideTxt(sd)+" "+s+" "+f(q*price,2)+" USDT по "+f(price,M[s].d));
   afterTrade()}
 function afterTrade(){$("amt").value="";setPct(0);renderAll()}
-function closePos(s,frac,why){var p=S.pos[s];if(!p)return;var price=p.sd>0?bestBid(s):bestAsk(s);if(why==="liq")price=mkp(s);var q=p.q*frac;closeRec(p,q,price,why||"close",why==="liq"?q*price*mmr(s):q*price*TAKER);if(S.wb<0)S.wb=0;save()}
+function closePos(s,frac,why){var p=S.pos[s];if(!p||!okp(s))return;var price=p.sd>0?bestBid(s):bestAsk(s);if(why==="liq")price=mkp(s);var q=p.q*frac;closeRec(p,q,price,why||"close",why==="liq"?q*price*mmr(s):q*price*TAKER);if(S.wb<0)S.wb=0;save()}
+function okp(s){var m=M[s];return!!(m&&m.p>0&&m.m>0&&isFinite(m.p)&&isFinite(m.m)&&m.m/m.p<1.5&&m.p/m.m<1.5)}
 function engine(){
   // limit orders
-  for(var i=S.ord.length-1;i>=0;i--){var o=S.ord[i],L=px(o.s);if(!L)continue;
+  for(var i=S.ord.length-1;i>=0;i--){var o=S.ord[i],L=px(o.s);if(!okp(o.s))continue;
     if(o.sd>0?L<=o.px:L>=o.px){S.ord.splice(i,1);fill(o.s,o.sd,o.q,o.px,{lev:o.lev,iso:o.iso,ro:o.ro,tp:o.tp,sl:o.sl,tpT:o.tpT,slT:o.slT,maker:true});toast("Лимитный ордер исполнен: "+sideTxt(o.sd)+" "+o.s)}}
   // tp / sl / liquidation
-  plist().forEach(function(p){if(!S.pos[p.s])return;
+  plist().forEach(function(p){if(!S.pos[p.s]||!okp(p.s))return;
     var tsrc=p.tpT==="mark"?mkp(p.s):px(p.s),ssrc=p.slT==="mark"?mkp(p.s):px(p.s);
     if(p.tp&&(p.sd>0?tsrc>=p.tp:tsrc<=p.tp)){closePos(p.s,1,"tp");toast("Сработал тейк-профит "+p.s);return}
     if(p.sl&&(p.sd>0?ssrc<=p.sl:ssrc>=p.sl)){closePos(p.s,1,"sl");toast("Сработал стоп-лосс "+p.s);return}
     if(p.iso){var lq=liqPrice(p);if(lq&&(p.sd>0?mkp(p.s)<=lq:mkp(p.s)>=lq)){closePos(p.s,1,"liq");toast("Ликвидация "+p.s+" (изолированная)")}}});
-  var cr=plist().filter(function(p){return!p.iso});
+  var cr=plist().filter(function(p){return!p.iso});if(cr.some(function(p){return!okp(p.s)}))cr=[];
   if(cr.length&&crossEq()<=crossMM()){cr.forEach(function(p){closePos(p.s,1,"liq")});if(S.wb<0)S.wb=0;toast("Ликвидация кросс-позиций");save()}
   dayCheck()}
 function dayCheck(){var d=new Date().toISOString().slice(0,10);if(!S.day||S.day.d!==d){S.day={d:d,v:marginBal()};save()}}
@@ -431,16 +436,16 @@ function renderBook(){var s=S.sym;if(!live||BOOK.s!==s||Date.now()-BOOK.t>4000)s
 var ws=null,dws=null,gotMsg=false,TICK={};
 function loadTicks(){fetch("https://fapi.binance.com/fapi/v1/exchangeInfo").then(function(r){return r.json()}).then(function(j){(j.symbols||[]).forEach(function(s){(s.filters||[]).forEach(function(fl){if(fl.filterType==="PRICE_FILTER"){var t=String(fl.tickSize).replace(/0+$/,"");TICK[s.symbol]=(t.split(".")[1]||"").length}})});Object.keys(M).forEach(function(s){if(TICK[s]!=null)M[s].d=TICK[s]})}).catch(function(){})}
 var FAPI="https://fapi.binance.com",DG={mode:"conn",last:0,err:"",wsTries:0},restT=null,restOn=false;
-function onTickers(d){d.forEach(function(t){if(!/USDT$/.test(t.s))return;var m=M[t.s]||(M[t.s]={m:+t.c,fr:0.0001,nft:nextFund()});if(!(t.s===S.sym&&Date.now()-(m.at||0)<3000))m.p=+t.c;m.chg=+t.P;m.vol=+t.q;m.o=+t.o;var dl=(t.c.split(".")[1]||"").replace(/0+$/,"").length;m.dl=Math.max(m.dl||0,dl);m.d=TICK[t.s]!=null?TICK[t.s]:Math.min(8,Math.max(m.dl,decOf(m.p)-1));if(!m.m)m.m=m.p})}
+function onTickers(d){d.forEach(function(t){if(!/USDT$/.test(t.s))return;var m=M[t.s]||(M[t.s]={m:+t.c,fr:0.0001,nft:nextFund()});var cc=+t.c;if(cc>0&&!(t.s===S.sym&&Date.now()-(m.at||0)<3000)){m.p=cc;m.ts=Date.now()}m.chg=+t.P;m.vol=+t.q;m.o=+t.o;var dl=(t.c.split(".")[1]||"").replace(/0+$/,"").length;m.dl=Math.max(m.dl||0,dl);m.d=TICK[t.s]!=null?TICK[t.s]:Math.min(8,Math.max(m.dl,decOf(m.p)-1));if(!m.m)m.m=m.p})}
 function goLive(mode){var first=!live||simOn;live=true;simOn=false;DG.mode=mode;feed();if(first){loadTicks();lastDepthSym=""}}
 function connect(){DG.wsTries++;
   var w;try{w=new WebSocket("wss://fstream.binance.com/stream?streams=!ticker@arr/!markPrice@arr@1s")}catch(e){DG.err="WebSocket: "+e.message;startRest();return}
   ws=w;var got=false;
   w.onmessage=function(ev){var j;try{j=JSON.parse(ev.data)}catch(x){return}var d=j.data;if(!Array.isArray(d))return;DG.last=Date.now();
-    if(!gotMsg){gotMsg=true;if(simOn||!Object.keys(M).length||DG.mode!=="rest")M={};stopRest()}
+    if(!gotMsg){gotMsg=true;if(simOn){var keep={};Object.keys(S.pos).forEach(function(s){keep[s]=1});Object.keys(M).forEach(function(s){if(!keep[s])delete M[s]})}stopRest()}
     if(!got){got=true;goLive("ws")}
     if(j.stream.indexOf("ticker")>=0)onTickers(d);
-    else d.forEach(function(t){var m=M[t.s];if(!m)return;m.m=+t.p;m.fr=+t.r;m.nft=+t.T});
+    else d.forEach(function(t){var m=M[t.s];if(!m||!(+t.p>0))return;m.m=+t.p;m.fr=+t.r;m.nft=+t.T});
     if(!LIST.length||Date.now()-(connect.lb||0)>15000){connect.lb=Date.now();rebuildList();if(!M[S.sym]&&LIST.length){S.sym=LIST[0]}}
     if(!loadK.live){loadK.live=true;loadK()}};
   w.onerror=function(){DG.err="WebSocket к Binance не подключился"};
@@ -449,18 +454,18 @@ function connect(){DG.wsTries++;
 function stopRest(){if(restT){clearInterval(restT);restT=null}restOn=false}
 function startRest(){if(restOn||gotMsg)return;restOn=true;
   fetch(FAPI+"/fapi/v1/ticker/24hr").then(function(r){return r.json()}).then(function(arr){if(!Array.isArray(arr))throw new Error("ответ не тот");if(gotMsg)return;
-    M={};arr.forEach(function(t){if(!/USDT$/.test(t.symbol))return;var c=+t.lastPrice;M[t.symbol]={p:c,m:c,chg:+t.priceChangePercent,vol:+t.quoteVolume,o:+t.openPrice,fr:0.0001,nft:nextFund(),d:TICK[t.symbol]!=null?TICK[t.symbol]:decOf(c)}});
+    arr.forEach(function(t){if(!/USDT$/.test(t.symbol))return;var c=+t.lastPrice;if(!(c>0))return;var o=M[t.symbol]||{};M[t.symbol]={p:c,m:o.m>0&&!simOn?o.m:c,chg:+t.priceChangePercent,vol:+t.quoteVolume,o:+t.openPrice,fr:0.0001,nft:nextFund(),d:TICK[t.symbol]!=null?TICK[t.symbol]:decOf(c)}});
     DG.last=Date.now();rebuildList();if(!M[S.sym])S.sym=LIST[0];goLive("rest");loadK.live=true;loadK();pollRest();restT=setInterval(pollRest,1500)})
   .catch(function(e){restOn=false;DG.err=(DG.err?DG.err+"; ":"")+"REST: "+(e&&e.message||"нет ответа");startSim()})}
 function pollRest(){if(gotMsg){stopRest();return}pollRest.n=(pollRest.n||0)+1;
-  fetch(FAPI+"/fapi/v1/ticker/price").then(function(r){return r.json()}).then(function(arr){(arr||[]).forEach(function(t){var m=M[t.symbol];if(m){m.p=+t.price;m.chg=m.o?(m.p/m.o-1)*100:m.chg}});DG.last=Date.now()}).catch(function(){});
+  fetch(FAPI+"/fapi/v1/ticker/price").then(function(r){return r.json()}).then(function(arr){(arr||[]).forEach(function(t){var m=M[t.symbol];if(m&&+t.price>0){m.p=+t.price;m.ts=Date.now();m.chg=m.o?(m.p/m.o-1)*100:m.chg}});DG.last=Date.now()}).catch(function(){});
   var s=S.sym;fetch(FAPI+"/fapi/v1/depth?symbol="+s+"&limit=20").then(function(r){return r.json()}).then(function(j){if(S.sym!==s||!j.bids)return;BOOK={s:s,a:j.asks.map(function(x){return[+x[0],+x[1]]}),b:j.bids.map(function(x){return[+x[0],+x[1]]}),t:Date.now()}}).catch(function(){});
-  if(pollRest.n%4===1)fetch(FAPI+"/fapi/v1/premiumIndex").then(function(r){return r.json()}).then(function(arr){(arr||[]).forEach(function(t){var m=M[t.symbol];if(m){m.m=+t.markPrice;m.fr=+t.lastFundingRate;m.nft=+t.nextFundingTime}})}).catch(function(){})}
+  if(pollRest.n%4===1)fetch(FAPI+"/fapi/v1/premiumIndex").then(function(r){return r.json()}).then(function(arr){(arr||[]).forEach(function(t){var m=M[t.symbol];if(m&&+t.markPrice>0){m.m=+t.markPrice;m.fr=+t.lastFundingRate;m.nft=+t.nextFundingTime}})}).catch(function(){})}
 function depth(){if(dws){try{dws.close()}catch(x){}dws=null}if(!live)return;var s=S.sym,l=s.toLowerCase();
   try{dws=new WebSocket("wss://fstream.binance.com/stream?streams="+l+"@aggTrade/"+l+"@markPrice@1s/"+l+"@depth20@100ms")}catch(e){return}
   dws.onmessage=function(ev){var j;try{j=JSON.parse(ev.data)}catch(x){return}if(S.sym!==s||!j.data)return;var d=j.data,st=j.stream||"",m=M[s];if(!m)return;
-    if(st.indexOf("@aggTrade")>0){m.p=+d.p;m.at=Date.now();fast()}
-    else if(st.indexOf("@markPrice")>0){m.m=+d.p;m.fr=+d.r;m.nft=+d.T}
+    if(st.indexOf("@aggTrade")>0){if(+d.p>0){m.p=+d.p;m.at=m.ts=Date.now()}fast()}
+    else if(st.indexOf("@markPrice")>0){if(+d.p>0){m.m=+d.p;m.fr=+d.r;m.nft=+d.T}}
     else{BOOK={s:s,a:(d.a||[]).map(function(x){return[+x[0],+x[1]]}).filter(function(x){return x[1]>0}),b:(d.b||[]).map(function(x){return[+x[0],+x[1]]}).filter(function(x){return x[1]>0}),t:Date.now()};fast()}};
   dws.onclose=function(){if(S.sym===s&&live)setTimeout(function(){if(S.sym===s)depth()},3000)}}
 var fastT=0;function fast(){if(fastT)return;fastT=setTimeout(function(){fastT=0;renderTop();renderBook();if(S.pos[S.sym]&&TAB==="pos"&&$("pg-f").classList.contains("on"))renderList()},200)}
@@ -622,7 +627,7 @@ var lastDepthSym="";
 $("feed").onclick=diag;
 [].forEach.call($("ivs").querySelectorAll("button[data-i]"),function(x){x.classList.toggle("on",x.dataset.i===S.iv)});
 buildFallback();/* shown until the live feed arrives */
-setPct(0);feed();renderAll();connect();
+setPct(0);feed();renderAll();connect();if(S.repaired){var n=S.repaired;delete S.repaired;save();setTimeout(function(){toast("Восстановлено: сделка, закрытая по ошибочной цене 0 ("+n+")")},800)}
 setInterval(function(){simTick();if(live&&DG.mode==="ws"&&lastDepthSym!==S.sym){lastDepthSym=S.sym;depth()}engine();tickK();renderAll()},1000);
 })();
 </script>
